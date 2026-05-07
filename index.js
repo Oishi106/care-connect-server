@@ -8,6 +8,7 @@ const Service = require('./models/Service');
 const Booking = require('./models/Booking');
 const Payment = require('./models/Payment');
 const Message = require('./models/Message');
+const CaregiverApplication = require('./models/CaregiverApplication');
 
 const port = process.env.PORT || 8000;
 const app = express();
@@ -294,6 +295,195 @@ app.get('/', (req, res) => {
     res.send('Care Connect Server is running');
 });
 
+// ================================================
+// এই routes গুলো index.js তে add করো
+// app.listen() এর উপরে
+// ================================================
+
+// ------------------------------------------------
+// ADMIN STATS
+// ------------------------------------------------
+
+app.get('/admin/stats', async (req, res) => {
+    try {
+        const mongoose = require('mongoose');
+        const db = mongoose.connection.db;
+
+        const [
+            totalUsers,
+            totalBookings,
+            pendingBookings,
+            confirmedBookings,
+            paidPayments,
+        ] = await Promise.all([
+            db.collection('users').countDocuments({ role: 'user' }),
+            Booking.countDocuments(),
+            Booking.countDocuments({ status: 'Pending' }),
+            Booking.countDocuments({ status: 'Confirmed' }),
+            Payment.find({ status: 'paid' }),
+        ]);
+
+        const totalRevenue = paidPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+        // Monthly revenue (current year)
+        const currentYear = new Date().getFullYear();
+        const monthlyRevenue = await Payment.aggregate([
+            {
+                $match: {
+                    status: 'paid',
+                    createdAt: {
+                        $gte: new Date(`${currentYear}-01-01`),
+                        $lte: new Date(`${currentYear}-12-31`),
+                    }
+                }
+            },
+            {
+                $group: {
+                    _id: { $month: '$createdAt' },
+                    total: { $sum: '$amount' },
+                    count: { $sum: 1 },
+                }
+            },
+            { $sort: { _id: 1 } }
+        ]);
+
+        res.send({
+            totalUsers,
+            activeCaregivers: await db.collection('caregiverapplications').countDocuments({ status: 'approved' }),
+            totalBookings,
+            pendingBookings,
+            confirmedBookings,
+            totalRevenue: totalRevenue.toFixed(0),
+            monthlyRevenue,
+        });
+    } catch (error) {
+        console.error('Stats error:', error.message);
+        res.status(500).send({ message: 'Failed to fetch stats', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// ADMIN — ALL BOOKINGS
+// ------------------------------------------------
+
+app.get('/admin/bookings', async (req, res) => {
+    try {
+        const { limit, status } = req.query;
+        const filter = status ? { status } : {};
+        let query = Booking.find(filter).sort({ createdAt: -1 });
+        if (limit) query = query.limit(parseInt(limit));
+        const bookings = await query;
+        res.send(bookings);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// ADMIN — ALL USERS
+// ------------------------------------------------
+
+app.get('/admin/users', async (req, res) => {
+    try {
+        const mongoose = require('mongoose');
+        const db = mongoose.connection.db;
+        const users = await db.collection('users')
+            .find({})
+            .sort({ createdAt: -1 })
+            .toArray();
+        res.send(users);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// User role update (make admin / suspend)
+app.patch('/admin/users/:email', async (req, res) => {
+    try {
+        const mongoose = require('mongoose');
+        const db = mongoose.connection.db;
+        await db.collection('users').updateOne(
+            { email: req.params.email },
+            { $set: { ...req.body, updatedAt: new Date() } }
+        );
+        res.send({ message: 'User updated' });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// ADMIN — ALL PAYMENTS
+// ------------------------------------------------
+
+app.get('/admin/payments', async (req, res) => {
+    try {
+        const { limit } = req.query;
+        let query = Payment.find().sort({ createdAt: -1 });
+        if (limit) query = query.limit(parseInt(limit));
+        const payments = await query;
+        res.send(payments);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// ADMIN — REPORTS
+// ------------------------------------------------
+
+app.get('/admin/reports', async (req, res) => {
+    try {
+        const currentYear = new Date().getFullYear();
+
+        const [monthlyRevenue, bookingsByService, bookingsByStatus] = await Promise.all([
+            // Monthly revenue
+            Payment.aggregate([
+                {
+                    $match: {
+                        status: 'paid',
+                        createdAt: { $gte: new Date(`${currentYear}-01-01`) }
+                    }
+                },
+                {
+                    $group: {
+                        _id: { $month: '$createdAt' },
+                        revenue: { $sum: '$amount' },
+                        count: { $sum: 1 },
+                    }
+                },
+                { $sort: { _id: 1 } }
+            ]),
+
+            // Bookings by service
+            Booking.aggregate([
+                { $group: { _id: '$serviceTitle', count: { $sum: 1 }, revenue: { $sum: '$totalPrice' } } },
+                { $sort: { count: -1 } },
+                { $limit: 8 }
+            ]),
+
+            // Bookings by status
+            Booking.aggregate([
+                { $group: { _id: '$status', count: { $sum: 1 } } }
+            ]),
+        ]);
+
+        const totalRevenue = await Payment.aggregate([
+            { $match: { status: 'paid' } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+
+        res.send({
+            monthlyRevenue,
+            bookingsByService,
+            bookingsByStatus,
+            totalRevenue: totalRevenue[0]?.total || 0,
+        });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
@@ -361,6 +551,47 @@ app.get('/messages/unread/count', async (req, res) => {
         const { email } = req.query;
         const count = await Message.countDocuments({ receiverEmail: email, read: false });
         res.send({ count });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+
+
+// Apply as caregiver
+app.post('/caregiver-applications', async (req, res) => {
+    try {
+        const existing = await CaregiverApplication.findOne({ email: req.body.email });
+        if (existing) return res.status(409).send({ message: 'Already applied' });
+        const app = new CaregiverApplication(req.body);
+        const result = await app.save();
+        res.status(201).send(result);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// Admin — সব applications
+app.get('/caregiver-applications', async (req, res) => {
+    try {
+        const { status } = req.query;
+        const filter = status ? { status } : {};
+        const apps = await CaregiverApplication.find(filter).sort({ createdAt: -1 });
+        res.send(apps);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// Admin — Approve / Reject
+app.patch('/caregiver-applications/:id', async (req, res) => {
+    try {
+        const result = await CaregiverApplication.findByIdAndUpdate(
+            req.params.id,
+            { status: req.body.status },
+            { new: true }
+        );
+        res.send(result);
     } catch (error) {
         res.status(500).send({ message: 'Failed', error: error.message });
     }
