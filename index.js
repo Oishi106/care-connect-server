@@ -13,7 +13,6 @@ const CaregiverApplication = require('./models/CaregiverApplication');
 const port = process.env.PORT || 8000;
 const app = express();
 
-// Connect to Database
 connectDB();
 
 // ------------------------------------------------
@@ -23,13 +22,8 @@ connectDB();
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
-
     try {
-        event = stripe.webhooks.constructEvent(
-            req.body,
-            sig,
-            process.env.STRIPE_WEBHOOK_SECRET
-        );
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (err) {
         console.error('Webhook Error:', err.message);
         return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -38,30 +32,22 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
     if (event.type === 'checkout.session.completed') {
         const session = event.data.object;
         const { bookingId, userEmail, serviceTitle } = session.metadata;
-
         try {
             if (bookingId) {
-                await Booking.findByIdAndUpdate(bookingId, {
-                    status: 'Confirmed',
-                    paymentStatus: 'paid',
-                });
+                await Booking.findByIdAndUpdate(bookingId, { status: 'Confirmed', paymentStatus: 'paid' });
             }
-
             await Payment.create({
-                userEmail,
-                bookingId,
+                userEmail, bookingId,
                 stripeSessionId: session.id,
                 amount: session.amount_total / 100,
                 status: 'paid',
                 serviceTitle: serviceTitle || 'Care Service',
             });
-
             console.log('Payment recorded for:', userEmail);
         } catch (err) {
             console.error('DB Update Error:', err.message);
         }
     }
-
     res.json({ received: true });
 });
 
@@ -73,8 +59,7 @@ app.use(cors());
 app.use(express.json());
 
 // ------------------------------------------------
-// SEED ROUTE
-// POST http://localhost:8000/seed-services
+// SEED
 // ------------------------------------------------
 
 app.post('/seed-services', async (req, res) => {
@@ -101,7 +86,6 @@ app.post('/seed-services', async (req, res) => {
             { title: "Disability Escort", description: "Assisting people with disabilities to travel to medical appointments.", price: 18, badge: "Escort", image: "https://i.ibb.co.com/nqW6Gq0y/Disability-Escort.avif", category: "Support" },
             { title: "Tutoring Help", description: "Educational support for children along with general childcare duties.", price: 15, badge: "Education", image: "https://i.ibb.co.com/GvJF5NKs/Tutoring-Help.avif", category: "Child Care" },
         ];
-
         await Service.deleteMany({});
         await Service.insertMany(services);
         res.send({ message: '20 services seeded successfully!' });
@@ -123,12 +107,31 @@ app.get('/services', async (req, res) => {
     }
 });
 
+app.post('/services', async (req, res) => {
+    try {
+        const service = new Service(req.body);
+        const result = await service.save();
+        res.status(201).send(result);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
 app.get('/services/category/:cat', async (req, res) => {
     try {
         const services = await Service.find({ category: req.params.cat });
         res.send(services);
     } catch (error) {
-        res.status(500).send({ message: 'Failed to fetch by category', error: error.message });
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.delete('/services/:id', async (req, res) => {
+    try {
+        await Service.findByIdAndDelete(req.params.id);
+        res.send({ message: 'Deleted' });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
     }
 });
 
@@ -225,6 +228,109 @@ app.put('/users/profile', async (req, res) => {
 });
 
 // ------------------------------------------------
+// MESSAGE ROUTES
+// NOTE: /messages/unread/count আগে আসতে হবে /messages/:bookingId এর আগে
+// ------------------------------------------------
+
+app.get('/messages/unread/count', async (req, res) => {
+    try {
+        const { email } = req.query;
+        if (!email) return res.status(400).send({ message: 'Email required' });
+        const count = await Message.countDocuments({ receiverEmail: email, read: false });
+        res.send({ count });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.get('/messages/:bookingId', async (req, res) => {
+    try {
+        const messages = await Message.find({ bookingId: req.params.bookingId }).sort({ createdAt: 1 });
+        res.send(messages);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.post('/messages', async (req, res) => {
+    try {
+        const msg = new Message(req.body);
+        const result = await msg.save();
+        res.status(201).send(result);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.patch('/messages/read/:bookingId', async (req, res) => {
+    try {
+        const { readerEmail } = req.body;
+        await Message.updateMany(
+            { bookingId: req.params.bookingId, receiverEmail: readerEmail, read: false },
+            { $set: { read: true } }
+        );
+        res.send({ message: 'Marked as read' });
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// CONVERSATIONS (confirmed bookings)
+// ------------------------------------------------
+
+app.get('/conversations', async (req, res) => {
+    try {
+        const { email } = req.query;
+        if (!email) return res.status(400).send({ message: 'Email required' });
+        const bookings = await Booking.find({ userEmail: email, status: 'Confirmed' }).sort({ createdAt: -1 });
+        res.send(bookings);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
+// CAREGIVER APPLICATIONS
+// ------------------------------------------------
+
+app.post('/caregiver-applications', async (req, res) => {
+    try {
+        const existing = await CaregiverApplication.findOne({ email: req.body.email });
+        if (existing) return res.status(409).send({ message: 'Already applied' });
+        const application = new CaregiverApplication(req.body);
+        const result = await application.save();
+        res.status(201).send(result);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.get('/caregiver-applications', async (req, res) => {
+    try {
+        const { status } = req.query;
+        const filter = status ? { status } : {};
+        const apps = await CaregiverApplication.find(filter).sort({ createdAt: -1 });
+        res.send(apps);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+app.patch('/caregiver-applications/:id', async (req, res) => {
+    try {
+        const result = await CaregiverApplication.findByIdAndUpdate(
+            req.params.id,
+            { status: req.body.status },
+            { new: true }
+        );
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ message: 'Failed', error: error.message });
+    }
+});
+
+// ------------------------------------------------
 // STRIPE CHECKOUT SESSION
 // ------------------------------------------------
 
@@ -264,22 +370,16 @@ app.post('/create-checkout-session', async (req, res) => {
     }
 });
 
-// ------------------------------------------------
-// STRIPE PAYMENT INTENT (পুরনোটা)
-// ------------------------------------------------
-
 app.post('/create-payment-intent', async (req, res) => {
     try {
         const { price } = req.body;
         if (!price) return res.status(400).send({ error: 'Price is required' });
-
         const amount = parseInt(price * 100);
         const paymentIntent = await stripe.paymentIntents.create({
             amount,
             currency: 'usd',
             payment_method_types: ['card'],
         });
-
         res.send({ clientSecret: paymentIntent.client_secret });
     } catch (error) {
         console.error('Stripe Error:', error.message);
@@ -288,20 +388,7 @@ app.post('/create-payment-intent', async (req, res) => {
 });
 
 // ------------------------------------------------
-// ROOT
-// ------------------------------------------------
-
-app.get('/', (req, res) => {
-    res.send('Care Connect Server is running');
-});
-
-// ================================================
-// এই routes গুলো index.js তে add করো
-// app.listen() এর উপরে
-// ================================================
-
-// ------------------------------------------------
-// ADMIN STATS
+// ADMIN ROUTES
 // ------------------------------------------------
 
 app.get('/admin/stats', async (req, res) => {
@@ -309,13 +396,7 @@ app.get('/admin/stats', async (req, res) => {
         const mongoose = require('mongoose');
         const db = mongoose.connection.db;
 
-        const [
-            totalUsers,
-            totalBookings,
-            pendingBookings,
-            confirmedBookings,
-            paidPayments,
-        ] = await Promise.all([
+        const [totalUsers, totalBookings, pendingBookings, confirmedBookings, paidPayments] = await Promise.all([
             db.collection('users').countDocuments({ role: 'user' }),
             Booking.countDocuments(),
             Booking.countDocuments({ status: 'Pending' }),
@@ -324,26 +405,11 @@ app.get('/admin/stats', async (req, res) => {
         ]);
 
         const totalRevenue = paidPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        const currentYear  = new Date().getFullYear();
 
-        // Monthly revenue (current year)
-        const currentYear = new Date().getFullYear();
         const monthlyRevenue = await Payment.aggregate([
-            {
-                $match: {
-                    status: 'paid',
-                    createdAt: {
-                        $gte: new Date(`${currentYear}-01-01`),
-                        $lte: new Date(`${currentYear}-12-31`),
-                    }
-                }
-            },
-            {
-                $group: {
-                    _id: { $month: '$createdAt' },
-                    total: { $sum: '$amount' },
-                    count: { $sum: 1 },
-                }
-            },
+            { $match: { status: 'paid', createdAt: { $gte: new Date(`${currentYear}-01-01`), $lte: new Date(`${currentYear}-12-31`) } } },
+            { $group: { _id: { $month: '$createdAt' }, total: { $sum: '$amount' }, count: { $sum: 1 } } },
             { $sort: { _id: 1 } }
         ]);
 
@@ -362,10 +428,6 @@ app.get('/admin/stats', async (req, res) => {
     }
 });
 
-// ------------------------------------------------
-// ADMIN — ALL BOOKINGS
-// ------------------------------------------------
-
 app.get('/admin/bookings', async (req, res) => {
     try {
         const { limit, status } = req.query;
@@ -379,25 +441,17 @@ app.get('/admin/bookings', async (req, res) => {
     }
 });
 
-// ------------------------------------------------
-// ADMIN — ALL USERS
-// ------------------------------------------------
-
 app.get('/admin/users', async (req, res) => {
     try {
         const mongoose = require('mongoose');
         const db = mongoose.connection.db;
-        const users = await db.collection('users')
-            .find({})
-            .sort({ createdAt: -1 })
-            .toArray();
+        const users = await db.collection('users').find({}).sort({ createdAt: -1 }).toArray();
         res.send(users);
     } catch (error) {
         res.status(500).send({ message: 'Failed', error: error.message });
     }
 });
 
-// User role update (make admin / suspend)
 app.patch('/admin/users/:email', async (req, res) => {
     try {
         const mongoose = require('mongoose');
@@ -412,10 +466,6 @@ app.patch('/admin/users/:email', async (req, res) => {
     }
 });
 
-// ------------------------------------------------
-// ADMIN — ALL PAYMENTS
-// ------------------------------------------------
-
 app.get('/admin/payments', async (req, res) => {
     try {
         const { limit } = req.query;
@@ -428,41 +478,20 @@ app.get('/admin/payments', async (req, res) => {
     }
 });
 
-// ------------------------------------------------
-// ADMIN — REPORTS
-// ------------------------------------------------
-
 app.get('/admin/reports', async (req, res) => {
     try {
         const currentYear = new Date().getFullYear();
-
         const [monthlyRevenue, bookingsByService, bookingsByStatus] = await Promise.all([
-            // Monthly revenue
             Payment.aggregate([
-                {
-                    $match: {
-                        status: 'paid',
-                        createdAt: { $gte: new Date(`${currentYear}-01-01`) }
-                    }
-                },
-                {
-                    $group: {
-                        _id: { $month: '$createdAt' },
-                        revenue: { $sum: '$amount' },
-                        count: { $sum: 1 },
-                    }
-                },
+                { $match: { status: 'paid', createdAt: { $gte: new Date(`${currentYear}-01-01`) } } },
+                { $group: { _id: { $month: '$createdAt' }, revenue: { $sum: '$amount' }, count: { $sum: 1 } } },
                 { $sort: { _id: 1 } }
             ]),
-
-            // Bookings by service
             Booking.aggregate([
                 { $group: { _id: '$serviceTitle', count: { $sum: 1 }, revenue: { $sum: '$totalPrice' } } },
                 { $sort: { count: -1 } },
                 { $limit: 8 }
             ]),
-
-            // Bookings by status
             Booking.aggregate([
                 { $group: { _id: '$status', count: { $sum: 1 } } }
             ]),
@@ -473,126 +502,24 @@ app.get('/admin/reports', async (req, res) => {
             { $group: { _id: null, total: { $sum: '$amount' } } }
         ]);
 
-        res.send({
-            monthlyRevenue,
-            bookingsByService,
-            bookingsByStatus,
-            totalRevenue: totalRevenue[0]?.total || 0,
-        });
+        res.send({ monthlyRevenue, bookingsByService, bookingsByStatus, totalRevenue: totalRevenue[0]?.total || 0 });
     } catch (error) {
         res.status(500).send({ message: 'Failed', error: error.message });
     }
 });
+
+// ------------------------------------------------
+// ROOT
+// ------------------------------------------------
+
+app.get('/', (req, res) => {
+    res.send('Care Connect Server is running');
+});
+
+// ------------------------------------------------
+// START SERVER
+// ------------------------------------------------
 
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
-});
-
-
-
-// User এর সব conversations (confirmed bookings থেকে)
-app.get('/conversations', async (req, res) => {
-    try {
-        const { email } = req.query;
-        if (!email) return res.status(400).send({ message: 'Email required' });
-
-        // Confirmed bookings = conversations
-        const bookings = await Booking.find({
-            userEmail: email,
-            status: 'Confirmed'
-        }).sort({ createdAt: -1 });
-
-        res.send(bookings);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// নির্দিষ্ট booking এর messages
-app.get('/messages/:bookingId', async (req, res) => {
-    try {
-        const messages = await Message.find({
-            bookingId: req.params.bookingId
-        }).sort({ createdAt: 1 });
-        res.send(messages);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// Message পাঠাও
-app.post('/messages', async (req, res) => {
-    try {
-        const msg = new Message(req.body);
-        const result = await msg.save();
-        res.status(201).send(result);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// Messages read করা হয়েছে mark করো
-app.patch('/messages/read/:bookingId', async (req, res) => {
-    try {
-        const { readerEmail } = req.body;
-        await Message.updateMany(
-            { bookingId: req.params.bookingId, receiverEmail: readerEmail, read: false },
-            { $set: { read: true } }
-        );
-        res.send({ message: 'Marked as read' });
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// Unread count
-app.get('/messages/unread/count', async (req, res) => {
-    try {
-        const { email } = req.query;
-        const count = await Message.countDocuments({ receiverEmail: email, read: false });
-        res.send({ count });
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-
-
-// Apply as caregiver
-app.post('/caregiver-applications', async (req, res) => {
-    try {
-        const existing = await CaregiverApplication.findOne({ email: req.body.email });
-        if (existing) return res.status(409).send({ message: 'Already applied' });
-        const app = new CaregiverApplication(req.body);
-        const result = await app.save();
-        res.status(201).send(result);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// Admin — সব applications
-app.get('/caregiver-applications', async (req, res) => {
-    try {
-        const { status } = req.query;
-        const filter = status ? { status } : {};
-        const apps = await CaregiverApplication.find(filter).sort({ createdAt: -1 });
-        res.send(apps);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
-});
-
-// Admin — Approve / Reject
-app.patch('/caregiver-applications/:id', async (req, res) => {
-    try {
-        const result = await CaregiverApplication.findByIdAndUpdate(
-            req.params.id,
-            { status: req.body.status },
-            { new: true }
-        );
-        res.send(result);
-    } catch (error) {
-        res.status(500).send({ message: 'Failed', error: error.message });
-    }
 });
