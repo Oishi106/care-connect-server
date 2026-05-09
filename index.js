@@ -512,8 +512,8 @@ app.get('/admin/reports', async (req, res) => {
 // ROOT
 // ------------------------------------------------
 
-app.get('/', (req, res) => {
-    res.send('Care Connect Server is running');
+app.get('/', (req, res) => {               
+    res.send('Care Connect Server is running');                         
 });
 
 // ------------------------------------------------
@@ -521,5 +521,5 @@ app.get('/', (req, res) => {
 // ------------------------------------------------
 
 app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+    console.log(`Server is running on port ${port}`);             
 });
